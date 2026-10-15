@@ -1,0 +1,26 @@
+{
+  "name": "telegram-link-crawler-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that crawls websites, inspects posts, and extracts magnet and target download links.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": [
+    "telegram-bot",
+    "web-crawler",
+    "magnet-links",
+    "scraper",
+    "grammy"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "grammy": "^1.35.0",
+    "node-cron": "^3.0.3"
+  }
+}

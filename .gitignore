@@ -1,0 +1,11 @@
+node_modules/
+.env
+data/database.json
+data/*.sqlite
+data/*.db
+data/cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
