@@ -1,8 +1,10 @@
-import { Bot, InlineKeyboard } from 'grammy';
+import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import { config, isUserAllowed } from './config.js';
 import { storage } from './storage.js';
 import { crawlWebsite } from './crawler.js';
 import { scheduler } from './scheduler.js';
+import { startFeedServer } from './server.js';
+import { getFeedXml } from './rss.js';
 
 if (!config.botToken) {
   console.error('ERROR: BOT_TOKEN is missing in .env! Please configure your Telegram bot token.');
@@ -59,15 +61,17 @@ bot.command('start', async (ctx) => {
     .text('❓ Help & Commands', 'menu_help')
     .text('👀 Active Watches', 'menu_watches')
     .row()
+    .text('📡 RSS Feeds', 'menu_rss')
     .text('📊 Bot Statistics', 'menu_stats');
 
   const welcomeText =
-    `🤖 *Welcome to Link Crawler & Monitor Bot!*\n\n` +
+    `🤖 *Welcome to Link Crawler & RSS Monitor Bot!*\n\n` +
     `I can visit any website, discover all its posts and sub-pages, and actively extract target links like *magnet links*, torrents, and downloads.\n\n` +
     `*Key Features:*\n` +
     `• 🧲 *Magnet Extraction:* Automatically captures \`magnet:?xt=...\` links from pages, attributes, and text.\n` +
     `• 🕷 *Deep Post Crawling:* Opens articles, threads, and posts found on index pages.\n` +
-    `• ⏱ *Active Background Monitoring:* Periodically checks websites for new posts and alerts you immediately.\n` +
+    `• ⏱ *Constant Monitoring:* Check sites every 5 minutes (or any interval) for new files.\n` +
+    `• 📡 *Live RSS Feeds:* Subscribe directly via qBittorrent, Transmission, or RSS readers!\n` +
     `• 🚫 *Zero Duplicates:* Remembers previously seen links to avoid duplicate alerts.\n\n` +
     `Send /help to see all available commands, or simply paste any website URL to get started!`;
 
@@ -81,20 +85,25 @@ bot.command('start', async (ctx) => {
 bot.command('help', async (ctx) => {
   const helpText =
     `📖 *Bot Commands & Usage Guide*\n\n` +
-    `*1. One-Off Deep Crawl*\n` +
+    `*1. Constant Automated Monitoring*\n` +
+    `\`/watch <URL> [interval_in_minutes] [filter]\`\n` +
+    `Monitors the website constantly (e.g. every 5 minutes) and alerts you immediately when a *new* post or magnet link is added.\n` +
+    `• Example: \`/watch https://example.com/blog 5 magnet\`\n` +
+    `• Default interval is 5 minutes if omitted.\n\n` +
+    `*2. Live RSS Feed*\n` +
+    `\`/rss\` or \`/feed\`\n` +
+    `Provides direct RSS 2.0 XML feed URLs for your torrent clients (**qBittorrent**, **Transmission**, **Deluge**) or RSS readers.\n` +
+    `• Includes both a global feed and per-site feeds.\n` +
+    `• Allows instant download of the current \`feed.xml\` file.\n\n` +
+    `*3. One-Off Deep Crawl*\n` +
     `\`/crawl <URL> [filter]\`\n` +
     `Crawls the website, opens up to 25 sub-posts, and extracts all target links.\n` +
-    `• Filters: \`magnet\` (default), \`torrent\`, \`all\`, or a custom regex.\n` +
+    `• Filters: \`magnet\` (default), \`torrent\`, \`all\`, or custom regex.\n` +
     `• Example: \`/crawl https://example.com/releases/ magnet\`\n\n` +
-    `*2. Automated Background Watch*\n` +
-    `\`/watch <URL> [interval_in_minutes] [filter]\`\n` +
-    `Monitors the website periodically and alerts you whenever a *new* link is posted.\n` +
-    `• Example: \`/watch https://example.com/blog 30 magnet\`\n` +
-    `• Default interval is 30 minutes if omitted.\n\n` +
-    `*3. Manage Watches*\n` +
-    `\`/watches\` - List all your monitored sites with interactive controls (Check Now, Pause, Delete).\n` +
+    `*4. Manage Watches*\n` +
+    `\`/watches\` - List all your monitored sites with interactive controls (Check Now, RSS, Pause, Delete).\n` +
     `\`/unwatch <id>\` - Remove a monitored site.\n\n` +
-    `*4. Maintenance & Info*\n` +
+    `*5. Maintenance & Info*\n` +
     `\`/stats\` - View crawl counts and link statistics.\n` +
     `\`/clear <domain>\` - Clear cache for a domain to allow re-detecting existing links.\n` +
     `\`/help\` - Show this guide.\n\n` +
@@ -270,6 +279,8 @@ bot.command('watches', async (ctx) => {
     const keyboard = new InlineKeyboard()
       .text(w.enabled ? '⏸ Pause' : '▶️ Resume', `toggle_${w.id}`)
       .text('⚡ Check Now', `check_${w.id}`)
+      .row()
+      .text('📡 RSS Feed', `rss_${w.id}`)
       .text('🗑 Delete', `del_${w.id}`);
 
     const lastChecked = w.lastCheck
@@ -281,7 +292,8 @@ bot.command('watches', async (ctx) => {
       `🆔 \`${w.id}\` | Status: ${w.enabled ? '🟢 Active' : '⏸ Paused'}\n` +
       `⏱ Interval: Every *${w.intervalMinutes}m* | Filter: \`${w.filterType}\`\n` +
       `🧲 Discovered Links: *${w.totalFound || 0}*\n` +
-      `🕒 Last Check: ${lastChecked}`;
+      `🕒 Last Check: ${lastChecked}\n` +
+      `📡 RSS: \`${config.feedBaseUrl}/rss/${w.id}\``;
 
     await ctx.reply(text, {
       parse_mode: 'Markdown',
@@ -289,6 +301,38 @@ bot.command('watches', async (ctx) => {
       reply_markup: keyboard,
     });
   }
+});
+
+// --- COMMAND: /rss or /feed ---
+bot.command(['rss', 'feed'], async (ctx) => {
+  const globalFeedUrl = `${config.feedBaseUrl}/rss`;
+  const watches = storage.getWatches(ctx.chat.id);
+
+  let msg =
+    `📡 *Live RSS Feeds (BitTorrent Compatible)*\n\n` +
+    `These RSS 2.0 feeds include \`<enclosure type="application/x-bittorrent">\` tags, ready for auto-downloading in:\n` +
+    `• *qBittorrent* (Tools > RSS > New Subscription)\n` +
+    `• *Transmission* / *Deluge* / *Synology Download Station*\n` +
+    `• Any standard RSS reader (Feedly, Inoreader, etc.)\n\n` +
+    `🌐 *Global Feed (All Monitored Sites):*\n\`${globalFeedUrl}\`\n\n`;
+
+  if (watches.length > 0) {
+    msg += `📋 *Dedicated Feeds per Monitored Site:*\n`;
+    for (const w of watches) {
+      msg += `• *${escapeMarkdown(w.name)}:*\n  \`${config.feedBaseUrl}/rss/${w.id}\`\n`;
+    }
+  } else {
+    msg += `💡 *Tip:* Use \`/watch <url> 5\` to start monitoring a website every 5 minutes.\n`;
+  }
+
+  const keyboard = new InlineKeyboard()
+    .text('📥 Download Global feed.xml', 'export_rss_file');
+
+  await ctx.reply(msg, {
+    parse_mode: 'Markdown',
+    disable_web_page_preview: true,
+    reply_markup: keyboard,
+  });
 });
 
 // --- COMMAND: /unwatch ---
@@ -452,6 +496,24 @@ bot.callbackQuery('menu_watches', (ctx) => {
   });
 });
 
+bot.callbackQuery('menu_rss', async (ctx) => {
+  ctx.answerCallbackQuery();
+  const globalFeedUrl = `${config.feedBaseUrl}/rss`;
+  const keyboard = new InlineKeyboard()
+    .text('📥 Download Global feed.xml', 'export_rss_file');
+
+  await ctx.reply(
+    `📡 *RSS Feed Access*\n\n` +
+    `Your live BitTorrent/RSS feed URL is:\n\`${globalFeedUrl}\`\n\n` +
+    `You can subscribe to this directly in *qBittorrent* or any RSS reader!`,
+    {
+      parse_mode: 'Markdown',
+      disable_web_page_preview: true,
+      reply_markup: keyboard,
+    }
+  );
+});
+
 bot.callbackQuery('menu_stats', async (ctx) => {
   ctx.answerCallbackQuery();
   const stats = storage.getStats(ctx.chat.id);
@@ -462,6 +524,58 @@ bot.callbackQuery('menu_stats', async (ctx) => {
     `• Crawls: ${stats.totalCrawls}`,
     { parse_mode: 'Markdown' }
   );
+});
+
+// Handle RSS button for a specific watch
+bot.callbackQuery(/^rss_(.+)$/, async (ctx) => {
+  const watchId = ctx.match[1];
+  const watch = storage.getWatchById(watchId);
+  if (!watch) {
+    return ctx.answerCallbackQuery({ text: 'Monitor not found!' });
+  }
+
+  await ctx.answerCallbackQuery();
+  const watchFeedUrl = `${config.feedBaseUrl}/rss/${watch.id}`;
+  const keyboard = new InlineKeyboard()
+    .text('📥 Download feed.xml', `export_watch_rss_${watch.id}`);
+
+  await ctx.reply(
+    `📡 *Dedicated RSS Feed for [${escapeMarkdown(watch.name)}](${watch.url})*\n\n` +
+    `🔗 *Feed URL:*\n\`${watchFeedUrl}\`\n\n` +
+    `Subscribe to this in qBittorrent, Transmission, or an RSS reader to get new files from this website automatically!`,
+    {
+      parse_mode: 'Markdown',
+      disable_web_page_preview: true,
+      reply_markup: keyboard,
+    }
+  );
+});
+
+// Handle export global feed.xml file
+bot.callbackQuery('export_rss_file', async (ctx) => {
+  await ctx.answerCallbackQuery({ text: 'Generating feed.xml...' });
+  const xml = getFeedXml();
+  const file = new InputFile(Buffer.from(xml, 'utf-8'), 'feed.xml');
+  await ctx.replyWithDocument(file, {
+    caption: '📡 Global RSS Feed (BitTorrent 2.0 compatible)',
+  });
+});
+
+// Handle export specific watch feed.xml file
+bot.callbackQuery(/^export_watch_rss_(.+)$/, async (ctx) => {
+  const watchId = ctx.match[1];
+  const watch = storage.getWatchById(watchId);
+  if (!watch) {
+    return ctx.answerCallbackQuery({ text: 'Monitor not found!' });
+  }
+
+  await ctx.answerCallbackQuery({ text: 'Generating feed...' });
+  const xml = getFeedXml(watchId);
+  const fileName = `${watch.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_feed.xml`;
+  const file = new InputFile(Buffer.from(xml, 'utf-8'), fileName);
+  await ctx.replyWithDocument(file, {
+    caption: `📡 RSS Feed for ${watch.name}`,
+  });
 });
 
 // --- PLAIN TEXT URL LISTENER ---
@@ -484,6 +598,7 @@ bot.on('message:text', async (ctx) => {
     const keyboard = new InlineKeyboard()
       .text('🔍 Crawl Now (One-off)', `crawl_now_${encoded}`)
       .row()
+      .text('⏱ Monitor Every 5m', `watch_5_${encoded}`)
       .text('⏱ Monitor Every 15m', `watch_15_${encoded}`)
       .text('⏱ Monitor Every 60m', `watch_60_${encoded}`);
 
@@ -512,8 +627,9 @@ bot.callbackQuery(/^watch_(\d+)_(.+)$/, async (ctx) => {
   });
 
   await ctx.reply(
-    `✅ Monitor set for [${escapeMarkdown(watch.name)}](${url}) every *${minutes} minutes*.\n` +
-    `You will receive alerts whenever new links are detected!`,
+    `✅ Monitor set for [${escapeMarkdown(watch.name)}](${url}) constantly every *${minutes} minutes*.\n` +
+    `• You will receive Telegram alerts whenever new links are detected!\n` +
+    `• RSS Feed: \`${config.feedBaseUrl}/rss/${watch.id}\``,
     { parse_mode: 'Markdown', disable_web_page_preview: true }
   );
 });
@@ -526,6 +642,9 @@ async function startBot() {
   console.log('[Bot] Linking scheduler...');
   scheduler.setBot(bot);
   scheduler.start();
+
+  console.log('[Bot] Starting built-in RSS feed server...');
+  startFeedServer();
 
   console.log('[Bot] Starting Telegram long polling...');
   bot.start({

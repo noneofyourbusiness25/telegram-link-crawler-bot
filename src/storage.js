@@ -177,6 +177,24 @@ class Storage {
     return removedLinks;
   }
 
+  getDiscoveredLinks(watchId = null, limit = 100) {
+    let list = Object.entries(this.data.seenLinks).map(([url, meta]) => ({
+      url,
+      ...meta,
+    }));
+
+    if (watchId) {
+      list = list.filter((item) => item.watchId === watchId);
+    }
+
+    list.sort((a, b) => new Date(b.discoveredAt || 0) - new Date(a.discoveredAt || 0));
+
+    if (limit && limit > 0) {
+      return list.slice(0, limit);
+    }
+    return list;
+  }
+
   getStats(chatId = null) {
     const userWatches = this.getWatches(chatId);
     return {
